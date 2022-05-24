@@ -1,0 +1,54 @@
+with dx as (
+select 
+du.email as email
+,case when is_top_dasher = true then true else false end as top_dasher
+,case when avg_star_rating is NOT NULL then avg_star_rating else NULL end as avg_star_rating
+from dimension_deliveries dd
+join dimension_users du on dd.dasher_id = du.dasher_id
+ join PRODDB.PUBLIC.FACT_TOP_DASHER top on top.dasher_id = dd.dasher_id
+where IS_FILTERED = TRUE 
+and IS_CONSUMER_PICKUP = FALSE
+and dd.submarket_id in (8, 17, 70, 72, 71, 63, 304)
+and dd.market_id in (8)
+and top.first_name != 'Righttoforget' and du.first_name != 'Righttoforget'
+group by 1,2,3
+),
+
+
+dx_pay as (
+select 
+email
+, pay_per_shift_hour
+from (
+      select 
+      du.email as email,
+      date_trunc('month', active_date) as month
+	    ,CAST(sum(adj_shift_seconds)/3600  AS INT)as total_shift_hours
+	    ,CAST(sum(total_pay)/100 AS INT) as total_dx_pay 
+	    ,CAST(total_dx_pay / nullif(total_shift_hours,0) AS INT) as pay_per_shift_hour
+	    ,row_number() over (partition by du.email order by month desc) as ranking
+	from dimension_dasher_shifts ds
+	join dimension_users du on ds.dasher_id = du.dasher_id
+  where has_preassign = false
+	and check_in_time is not null
+	and check_out_time is not null
+	and check_in_time < check_out_time
+	and ds.submarket_id in (8, 17, 70, 72, 71, 63, 304)
+  and ds.market_id in (8)
+	--and active_date >= current_date - 28
+	group by 1,2)
+where ranking = 1)
+
+select 
+distinct d.email
+,top_dasher
+,avg_star_rating
+,pay_per_shift_hour
+from dx d join dx_pay dp on d.email = dp.email
+where d.email not ilike '%doordash.com' -- employees
+and d.email not ilike '%crometrics.com' -- test emails
+and d.email not ilike '%ext.dashcorps.com' -- courier emails
+and d.email not ilike '%dashcorps.com' -- dashcorps emails
+and d.email not ilike '%forgotten.com'
+and d.top_dasher = 'true'
+group by 1,2,3,4
