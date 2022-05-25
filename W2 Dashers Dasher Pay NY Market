@@ -1,0 +1,28 @@
+with dx_pay as (
+select 
+email
+, pay_per_shift_hour
+from (
+      select 
+      du.email as email,
+      date_trunc('month', active_date) as month
+	    ,CAST(sum(adj_shift_seconds)/3600  AS INT)as total_shift_hours
+	    ,CAST(sum(total_pay)/100 AS INT) as total_dx_pay 
+	    ,CAST(total_dx_pay / nullif(total_shift_hours,0) AS INT) as pay_per_shift_hour
+	    ,row_number() over (partition by du.email order by month desc) as ranking
+	from dimension_dasher_shifts ds
+	join dimension_users du on ds.dasher_id = du.dasher_id
+  where has_preassign = false
+	and check_in_time is not null
+	and check_out_time is not null
+	and check_in_time < check_out_time
+       and  du.email not ilike '%doordash.com' -- employees
+       and du.email not ilike '%crometrics.com' -- test emails
+       and du.email not ilike '%ext.dashcorps.com' -- courier emails
+       and du.email not ilike '%dashcorps.com' -- dashcorps emails
+       and du.email not ilike '%forgotten.com'
+       --and du.first_name != 'Righttoforget'
+	and ds.submarket_id in (8, 17, 70, 72, 71, 63, 304)
+  and ds.market_id in (8)
+	group by 1,2)
+where ranking = 1) ,
