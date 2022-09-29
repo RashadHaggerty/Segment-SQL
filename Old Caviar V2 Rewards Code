@@ -1,0 +1,28 @@
+WITH base AS (
+SELECT 
+consumer_id
+, email
+, bucket
+, SUM(CASE WHEN dd.active_date BETWEEN '2022-06-06'::DATE  - INTERVAL '30 DAYS' AND '2022-06-06'::DATE - INTERVAL '1 DAY' THEN dd.gov::FLOAT/100 ELSE 0 END) AS v2_rewards_m0_gmv
+, SUM(CASE WHEN dd.active_date BETWEEN '2022-06-06'::DATE AND '2022-06-06'::DATE + INTERVAL '29 DAYS' THEN dd.gov::FLOAT/100 ELSE 0 END) AS v2_rewards_m1_gmv
+, SUM(CASE WHEN dd.active_date BETWEEN '2022-06-06'::DATE + INTERVAL '30 DAYS' AND '2022-06-06'::DATE + INTERVAL '59 DAYS' THEN dd.gov::FLOAT/100 ELSE 0 END) AS v2_rewards_m2_gmv
+FROM markwu.caviar_rewards_june_launch_audience a 
+LEFT JOIN proddb.public.dimension_deliveries dd ---ON  a.consumer_id = dd.creator_id
+    ON dd.is_caviar = 1 
+    AND dd.is_filtered_core = 1 
+    AND dd.active_date >= '2022-06-06'::DATE - INTERVAL '30 DAYS'
+    AND dd.active_date <= '2022-09-05'::DATE 
+    AND dd.creator_id = a.consumer_id
+GROUP BY 1,2,3 
+)
+
+SELECT 
+email
+--a.email as "email"
+, CASE WHEN bucket = 'v2' AND v2_rewards_m0_gmv >= 150.0 THEN True ELSE NULL END AS v2_rewards_m1_qualified
+, CASE WHEN bucket = 'v2' AND v2_rewards_m1_gmv >= 150.0 THEN True ELSE NULL END AS v2_rewards_m2_qualified
+, CASE WHEN bucket = 'v2' AND v2_rewards_m2_gmv >= 150.0 THEN True ELSE NULL END AS v2_rewards_m3_qualified
+, CASE WHEN bucket = 'v2' AND v2_rewards_m0_gmv >= 150.0 THEN (CASE WHEN (150.00 - v2_rewards_m1_gmv) >= 0 THEN (150.00 - v2_rewards_m1_gmv) ELSE 0 END) ELSE NULL END AS v2_rewards_m1_dollars_left 
+, CASE WHEN bucket = 'v2' AND v2_rewards_m0_gmv >= 150.0 THEN (CASE WHEN (150.00 - v2_rewards_m2_gmv) >= 0 THEN (150.00 - v2_rewards_m2_gmv) ELSE 0 END) ELSE NULL END AS v2_rewards_m2_dollars_left 
+FROM base --a 
+;
