@@ -1,0 +1,110 @@
+WITH cancels AS (
+SELECT 
+  DISTINCT s.ID AS SUBSCRIPTION_ID
+  , s.START_TIME
+  , s.CANCELLED_AT -- could be used up 
+    , DATEDIFF('hour',s.START_TIME, s.CANCELLED_AT) AS canceled_time
+FROM PRODDB.PUBLIC.MAINDB_CONSUMER_SUBSCRIPTION s 
+JOIN PRODDB.PUBLIC.MAINDB_CONSUMER_SUBSCRIPTION_PLAN sp ON sp.ID = s.CONSUMER_SUBSCRIPTION_PLAN_ID 
+JOIN PRODDB.PUBLIC.DIMENSION_USERS u ON u.CONSUMER_ID = s.CONSUMER_ID
+WHERE sp.PLAN_TYPE = 'LUNCHPASS' 
+  AND s.subscription_status != 'cancelled_subscription_invoice_failed'
+  AND u.EMAIL NOT ILIKE '%@doordash.com%'
+)   
+
+, lunchpass_orders AS(
+SELECT
+  md.ID AS DELIVERY_ID
+  , u.CONSUMER_ID
+  , md.CREATED_AT 
+  , md.ACTUAL_DELIVERY_TIME 
+  , md.QUOTED_DELIVERY_TIME 
+  , md.CANCELLED_AT
+  , ocdc.STORE_ORDER_CART_ID 
+  , soc.DISCOUNT_AMOUNT / 100.0 AS lunchpass_discount
+FROM DELIVERY.PUBLIC.MAINDB_DELIVERY md 
+JOIN PRODDB.PUBLIC.MAINDB_ORDER_CART_DISCOUNT_COMPONENT ocdc ON ocdc.STORE_ORDER_CART_ID = md.STORE_ORDER_CART_ID 
+JOIN PRODDB.PUBLIC.MAINDB_STORE_ORDER_CART soc ON soc.ORDER_CART_ID = ocdc.ORDER_CART_ID
+JOIN PRODDB.PUBLIC.DIMENSION_USERS u ON u.USER_ID = md.CREATOR_ID
+WHERE ocdc."GROUP" = 'subscription_mealplan' -- will need to confirm the final version of this 
+AND md.CREATED_AT::DATE >= '2022-03-31'  
+AND md.is_from_store_to_us = FALSE  
+AND md.is_test = FALSE 
+AND md.parent_delivery_id IS NULL
+-- AND md.ACTUAL_DELIVERY_TIME IS NULL 
+-- AND u.EMAIL NOT ILIKE '%@doordash.com%' 
+GROUP BY 1,2,3,4,5,6,7,8
+)
+
+, subscription_base AS (
+SELECT 
+  --subscription info
+  s.ID AS lunchpass_subscription_id
+  , sp.ID AS plan_id
+  , CASE WHEN sp.ID = 10002420 THEN 'one_meal_trial' ELSE 'three_meal_plan' END AS lunchpass_plan_type
+  , u.CONSUMER_ID AS lunchpass_consumer_id
+  , u.EMAIL AS email
+  , s.START_TIME AS lunchpass_start_time
+  , s.START_TIME::DATE AS lunchpass_subscription_start_date
+  , s.END_TIME AS lunchpass_end_time
+  , s.END_TIME::DATE AS lunchpass_subscription_expiration_date
+  , CASE WHEN GETDATE()::DATE < s.END_TIME::DATE THEN DATEDIFF('day',GETDATE()::DATE, s.END_TIME::DATE) ELSE NULL END AS lunchpass_days_remaining 
+  , s.CANCELLED_AT AS lunchpass_cancelled_at-- could be used up 
+  , s.CANCELLATION_REQUESTED_AT AS lunchpass_cancelled_requested_at-- this will have the final tag for when a subscription is used up 
+  , s.SUBSCRIPTION_STATUS AS lunchpass_subscription_status--(active, strings for status updated) -- will be multiple fields 
+  , CASE WHEN s.CANCELLED_AT IS NULL AND s.CANCELLATION_REQUESTED_AT IS NULL THEN 1 ELSE 0 END AS lunchpass_active_plan 
+  -- meals and timestamp
+  , mt.NUM_REMAINING_MEALS  AS lunchpass_remaining_deliveries
+  , mt.UPDATED_AT AS lunchpass_updated_at
+  , COALESCE(s.CANCELLATION_REQUESTED_AT, s.CANCELLED_AT, s.END_TIME) AS lunchpass_min_time
+  -- scheduled order count
+  , COUNT(DISTINCT CASE WHEN lo.ACTUAL_DELIVERY_TIME IS NOT NULL THEN lo.DELIVERY_ID END) As lunchpass_compleated_delivery_count
+  , COUNT(DISTINCT CASE WHEN lo.QUOTED_DELIVERY_TIME IS NOT NULL AND lo.ACTUAL_DELIVERY_TIME IS NULL AND lo.CANCELLED_AT IS NULL THEN lo.DELIVERY_ID END) As lunchpass_scheduled_delivery_count
+  , CAST((SUM(lo.lunchpass_discount) - (lunchpass_compleated_delivery_count * 12)) AS integer) AS lunchpass_subscription_total_savings
+FROM PRODDB.PUBLIC.MAINDB_CONSUMER_SUBSCRIPTION s 
+JOIN PRODDB.PUBLIC.DIMENSION_USERS u ON u.CONSUMER_ID = s.CONSUMER_ID
+JOIN PRODDB.PUBLIC.MAINDB_CONSUMER_SUBSCRIPTION_PLAN as sp ON sp.ID = s.CONSUMER_SUBSCRIPTION_PLAN_ID 
+LEFT JOIN lunchpass_orders lo ON lo.CONSUMER_ID = s.CONSUMER_ID AND lo.CREATED_AT BETWEEN s.START_TIME AND COALESCE(s.CANCELLATION_REQUESTED_AT, s.CANCELLED_AT, s.END_TIME) -- joining on the aggregration for delivery count and savings per subscription 
+LEFT JOIN SUBSCRIPTION_SERVICE.PUBLIC.CRDB_CONSUMER_MEALPLAN_METADATA mt ON mt.CONSUMER_SUBSCRIPTION_ID = s.ID
+WHERE sp.PLAN_TYPE = 'LUNCHPASS' 
+  AND s.subscription_status != 'cancelled_subscription_invoice_failed'
+   AND s.ID NOT IN (SELECT SUBSCRIPTION_ID FROM cancels WHERE canceled_time <= 10)
+group by 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16
+) 
+
+, delivery_list AS (
+SELECT 
+  lo.DELIVERY_ID
+  , s.lunchpass_consumer_id
+  , s.lunchpass_subscription_id
+  , lo.ACTUAL_DELIVERY_TIME
+  , row_number() over (partition by s.lunchpass_subscription_id order by lo.CREATED_AT ASC) as delivery_number
+FROM subscription_base s
+JOIN lunchpass_orders lo ON lo.CONSUMER_ID = s.lunchpass_consumer_id AND lo.CREATED_AT BETWEEN s.lunchpass_start_time AND s.lunchpass_min_time
+WHERE lo.ACTUAL_DELIVERY_TIME IS NOT NULL 
+)
+
+, subscription_final AS (
+SELECT
+  sb.*
+  , CASE WHEN sb.plan_id = 10002420 THEN dl_two.ACTUAL_DELIVERY_TIME ELSE dl.ACTUAL_DELIVERY_TIME END AS lunchpass_max_time
+FROM subscription_base sb
+LEFT JOIN delivery_list dl ON dl.lunchpass_subscription_id = sb.lunchpass_subscription_id AND dl.delivery_number = 3
+LEFT JOIN delivery_list dl_two ON dl_two.lunchpass_subscription_id = sb.lunchpass_subscription_id AND dl_two.delivery_number = 1
+)
+
+, sub_list AS (
+SELECT
+  sf.email
+  , sf.lunchpass_subscription_id
+FROM subscription_final sf
+INNER JOIN (SELECT lunchpass_consumer_id , MAX(lunchpass_start_time) AS lunchpass_start_time FROM subscription_final GROUP BY 1) s ON sf.lunchpass_consumer_id = s.lunchpass_consumer_id AND sf.lunchpass_start_time = s.lunchpass_start_time
+GROUP BY 1 ,2
+) 
+  
+SELECT
+   *
+FROM subscription_final
+WHERE lunchpass_subscription_id IN (SELECT lunchpass_subscription_id FROM sub_list)
+
+
