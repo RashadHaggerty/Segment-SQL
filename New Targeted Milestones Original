@@ -1,0 +1,28 @@
+with cx_raw as (
+    select consumer_id
+        , consumer_bucket as bucket
+        , min(exposure_date) as exposure_date
+    from edw.consumer.campaign_analyzer_exposures
+        where business_campaign_name = 'Organic Traffic Conversion'
+        and exposure_platform = 'experiment'
+    group by 1,2
+)
+, cx_base as (
+    select consumer_id
+        , bucket
+        , exposure_date
+        , row_number() over (partition by consumer_id order by exposure_date) rn
+    from cx_raw
+    qualify rn = 1
+)
+select --a.consumer_id
+     a.bucket AS PERSONAS_New_Browse_Targeted_Milestone_Bucket
+    , a.exposure_date AS PERSONAS_New_Browse_Exposure_Milestone_Date
+    , b.email as Email
+    from cx_base a
+    inner join dimension_users b
+    on a.consumer_id = b.consumer_id
+    where b.experience='doordash'
+    and exposure_date >= dateadd(day,-7,current_date)
+    ;  
+  
