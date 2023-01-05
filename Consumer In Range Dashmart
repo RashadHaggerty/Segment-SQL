@@ -1,0 +1,76 @@
+ with 
+cng as (
+select
+  s.id as store_id
+, m.id as business_id
+, m.name as business_name
+, business_vertical_id
+, case when business_vertical_id in (166,167)              then '1P Convenience'
+       when business_vertical_id in (100,67)               then '3P Convenience'
+       when business_vertical_id in (69)                   then 'Hot & Prepared' 
+       when business_vertical_id in (68,65)  			   then 'Grocery'
+  		else 'Other'         end as cng_business_line
+, b.primary_tag_name
+from doordash_merchant.public.maindb_business m 
+join doordash_merchant.public.maindb_store s on s.business_id = m.id
+left join doordash_merchant.public.maindb_store_retail_extension_attributes a on a.store_id = s.id 
+left join geo_intelligence.public.maindb_address ad on ad.id=s.address_id
+left join public.dimension_store b on s.id= b.store_id
+where business_vertical_id is not null 
+and s.is_active = TRUE 
+and s.is_test = FALSE
+and business_vertical_id in (166,167)
+) ,
+
+dx_email as (
+select DISTINCT(TRIM(public.dimension_users.email))  as Email , cng.store_id, public.dimension_users.first_name , ---public.dimension_users.last_name,
+ case when cng.store_id is not null then true else false end as personas_in_radius_dashmart ,cng.business_name ,
+ ROW_NUMBER() OVER(PARTITION BY public.dimension_users.email ORDER BY cng.store_id ASC) AS Email_Rank
+from fact_store_availability fsa 
+join cng on try_cast(fsa.store_id as number)= try_cast(cng.store_id as number) and cng.cng_business_line = '1P Convenience'
+join public.dimension_users on try_cast(fsa.consumer_id as number) = try_cast(public.dimension_users.consumer_id as number)
+where 
+public.dimension_users.email is not null
+and public.dimension_users.email <>''
+and public.dimension_users.first_name !='Righttoforget' 
+and public.dimension_users.email not like '%doordash.com' -- employees
+and public.dimension_users.email not like '%crometrics.com' -- test emails
+and public.dimension_users.email not like '%ext.dashcorps.com' -- courier emails
+and public.dimension_users.email not like '%dashcorps.com'-- dashcorps emails 
+and public.dimension_users.email not like '%forgotten.com'
+---and public.dimension_users.email in ('00052787@richland2.org','anima.alex@tutanota.com','bhotmail','bnshaw86@gmail.com','aaa@aol.com','vlturrentine@gmail.com','nrivera07@gmail.com')
+--qualify Email_Rank = 1  
+---and public.dimension_users.email in ('00052787@richland2.org','anima.alex@tutanota.com','bhotmail','bnshaw86@gmail.com','aaa@aol.com','vlturrentine@gmail.com','nrivera07@gmail.com')
+--GROUP BY Email, personas_in_radius_dashmart, cng.store_id, cng.business_id, cng.business_name having count(*) > 1
+order by 1
+
+) ,
+
+   final_email_group as (
+    
+       SELECT DISTINCT(TRIM(d.Email)) AS ND_EMAIL ,d.personas_in_radius_dashmart, d.Email_Rank
+       FROM dx_email d
+      JOIN  SEGMENT_EVENTS_RAW.PERSONAS_CONSUMER.IDENTIFIES e on d.Email = e.EMAIL
+       WHERE Email_Rank = 1 
+     GROUP BY 1,2,3
+      )  ,
+     
+  
+non_dup_emails as(
+        SELECT DISTINCT(ND_EMAIL) AS EMAIL, personas_in_radius_dashmart ,Count(*) as Non_Dup_Count,  Email_rank, case when Count(*) != 1 then 0 else Email_rank end AS Email_ND_Rank
+        FROM final_email_group
+        WHERE Email_Rank = 1
+        GROUP BY 1 ,2, 4 --HAVING COUNT(*) > 1
+    
+  
+  )
+select DISTINCT(TRIM(EMAIL)) AS Email  ,  personas_in_radius_dashmart
+FROM non_dup_emails 
+---join dx_email D ON D.Email = E.Email and Non_Dup_count = 1 and E.Email_ND_Rank = D.Email_rank
+WHERE Email_ND_Rank = 1
+AND Non_Dup_Count = 1
+AND EMAIL NOT LIKE '"%'
+AND EMAIL NOT LIKE  '\-%'
+AND EMAIL NOT LIKE ')%'
+AND EMAIL NOT LIKE ')%'
+AND EMAIL NOT LIKE '!%'
