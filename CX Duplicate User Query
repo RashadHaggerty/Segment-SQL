@@ -1,0 +1,17 @@
+with cx as (
+select a.consumer_id , 
+    count(distinct linked_user) + max(case when linked_user = 999999999 then 1000 else 0 end) as num_of_linked_user, --linked user 999999999 indicate suspicious phone number which associates with over 1000 users
+    count(distinct case when type = 'device' then linked_user end) as num_of_user_linked_through_device,
+    count(distinct case when type = 'phone' then linked_user end)  + max(case when linked_user = 999999999 then 1000 else 0 end) as num_of_user_linked_through_phone_number,
+    count(distinct case when type = 'email' then linked_user end) as num_of_user_linked_through_email,
+    count(distinct case when type = 'card' then linked_user end) as num_of_user_linked_through_card_fingerprint, 
+TRUE as is_duplicate_user
+from public.fact_cx_linkage_base a 
+group by 1
+having num_of_linked_user>=5 
+) 
+select distinct trim(u.email) as email 
+, a.is_duplicate_user
+from cx a 
+join dimension_users u on a.consumer_id = u.consumer_id and u.experience ilike '%doordash%'
+;
