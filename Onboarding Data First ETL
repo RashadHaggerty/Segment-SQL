@@ -1,0 +1,92 @@
+WITH ADMINS AS (
+  SELECT
+    DISTINCT ROLES.TEAM_ACCOUNT_ID,
+    TA.name AS TEAM_ACCOUNT_NAME,
+    MEMBERS.email AS EMAIL,
+    MEMBERS.USER_ID,
+    ROLES.role AS ROLE,
+    ROLES.TEAM_MEMBER_ID
+  FROM
+    team_management_prod.public.maindb_team_account_roles ROLES
+    JOIN team_management_prod.public.maindb_team_members MEMBERS ON MEMBERS.id = ROLES.team_member_id
+    JOIN team_management_prod.public.maindb_team_accounts TA ON ROLES.team_account_id = TA.id
+  WHERE
+    ROLES.role = 'admin'
+    AND TA.name NOT ILIKE '%fraud%'
+    AND TA.name NOT ILIKE '%doordash%'
+    AND MEMBERS.email NOT LIKE '%doordash.com'
+),
+ADMINS_2 AS (
+  SELECT
+    M.*,
+    TEAM_ACCOUNT_NAME,
+    EMAIL,
+    USER_ID,
+    ROLE,
+    ROW_NUMBER() OVER (
+      PARTITION BY M.TEAM_MEMBER_ID
+      ORDER BY
+        CREATED_AT DESC
+    ) AS TEAM_JOIN_ORDER
+  FROM
+    team_management_prod.public.maindb_team_account_memberships M
+    JOIN ADMINS A ON M.TEAM_MEMBER_ID = A.TEAM_MEMBER_ID
+    AND M.TEAM_ACCOUNT_ID = A.TEAM_ACCOUNT_ID QUALIFY TEAM_JOIN_ORDER = 1
+),
+ADD_MEMBERS AS (
+  SELECT
+    M.USER_ID,
+    EVENT,
+    TIMESTAMP AS PERSONAS_workportal_click_add_members,
+    ROW_NUMBER() OVER (
+      PARTITION BY M.USER_ID
+      ORDER BY
+        TIMESTAMP DESC
+    ) AS LAST_ADD
+  FROM
+    segment_events_raw.work_portal.workportal_click_add_members M
+    JOIN ADMINS_2 A ON (TO_CHAR(A.USER_ID)) = M.USER_ID -- WHERE EMAIL NOT LIKE '%doordash.com'
+    QUALIFY LAST_ADD = 1
+),
+ADD_BUDGET AS (
+  SELECT
+    B.USER_ID,
+    EVENT,
+    TIMESTAMP AS PERSONAS_workportal_submit_add_budget,
+    ROW_NUMBER() OVER (
+      PARTITION BY B.USER_ID
+      ORDER BY
+        TIMESTAMP DESC
+    ) AS LAST_ADD
+  FROM
+    segment_events_raw.work_portal.workportal_submit_add_budget B
+    JOIN ADMINS_2 A ON (TO_CHAR(A.USER_ID)) = B.USER_ID --WHERE EMAIL NOT LIKE '%doordash.com'
+    QUALIFY LAST_ADD = 1
+),
+ADD_SUCCESS AS (
+  SELECT
+    S.USER_ID,
+    EVENT,
+    TIMESTAMP AS PERSONAS_ddfw_payment_add_method_success,
+    ROW_NUMBER() OVER (
+      PARTITION BY S.USER_ID
+      ORDER BY
+        TIMESTAMP DESC
+    ) AS LAST_ADD
+  FROM
+    segment_events_raw.work_portal.ddfw_payment_add_method_success S
+    JOIN ADMINS_2 A ON (TO_CHAR(A.USER_ID)) = S.USER_ID --WHERE EMAIL NOT LIKE '%doordash.com'
+    QUALIFY LAST_ADD = 1
+)
+SELECT
+  DISTINCT(EMAIL) AS EMAIL,
+  TEAM_ACCOUNT_NAME AS PERSONAS_DDFW_ONBOARDING_TEAM_ACCOUNT_NAME,
+  PERSONAS_workportal_click_add_members,
+  PERSONAS_workportal_submit_add_budget,
+  PERSONAS_ddfw_payment_add_method_success,
+  CASE WHEN PERSONAS_workportal_click_add_members IS NOT NULL AND PERSONAS_workportal_submit_add_budget IS NOT NULL AND PERSONAS_ddfw_payment_add_method_success IS NOT NULL THEN 'True' ELSE 'False' END AS PERSONAS_ddfw_onboarding_completed
+FROM
+  ADMINS_2 A
+  LEFT JOIN ADD_MEMBERS M ON M.USER_ID = A.USER_ID
+  LEFT JOIN ADD_BUDGET B ON B.USER_ID = A.USER_ID
+  LEFT JOIN ADD_SUCCESS S ON S.USER_ID = A.USER_ID
