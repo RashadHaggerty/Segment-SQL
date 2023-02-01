@@ -1,0 +1,25 @@
+with base AS (
+SELECT 
+email 
+,role
+FROM TEAM_MANAGEMENT_PROD.PUBLIC.MAINDB_TEAM_MEMBERS m 
+JOIN (SELECT
+      team_member_id
+      ,role
+      FROM TEAM_MANAGEMENT_PROD.PUBLIC.MAINDB_TEAM_ACCOUNT_ROLES
+      GROUP BY 1,2 ) r ON r.team_member_id = m.id  
+WHERE email NOT LIKE '%doordash.com'
+
+UNION 
+
+SELECT 
+email 
+,'member' AS role
+FROM TEAM_MANAGEMENT_PROD.PUBLIC.MAINDB_TEAM_MEMBER_PENDING_INVITES m 
+WHERE email NOT LIKE '%doordash.com'
+)
+
+SELECT EMAIL
+, ROLE as DDFW_Role
+FROM base 
+QUALIFY ROW_NUMBER() OVER (PARTITION BY email ORDER BY role) = 1 ;
