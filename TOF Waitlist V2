@@ -1,0 +1,80 @@
+with sm_waitlist_base as (
+select *
+  ,lag(direct_cap,1) over (partition by sm_id order by updated_timestamp_pst) as prev_direct_cap
+  ,lag(bof_cap,1) over (partition by sm_id order by updated_timestamp_pst) as prev_bof_cap
+  ,lag(updated_timestamp_pst,1) over (partition by sm_id order by updated_timestamp_pst) as prev_updated_timestamp_pst
+from static.dx_waitlist_app_caps
+where updated_timestamp_pst is not null
+)
+
+
+,sm_update_rank as (
+  select *
+    ,row_number() over (partition by sm_id order by updated_timestamp_pst desc) as rank
+  from static.dx_waitlist_app_caps
+)
+ 
+,non_waitlist_sm as (
+    select *
+    from sm_update_rank
+    where rank = 1
+    and direct_cap is null
+)
+  
+,sm_waitlist_change as 
+(
+select *
+from sm_waitlist_base
+where direct_cap is null and prev_direct_cap is not null
+)
+
+,tof_waitlist_dx as (
+select 
+  da.dasher_applicant_id
+  ,da.dasher_id
+  ,da.applied_submarket_id 
+  ,convert_timezone (da.applied_timezone, 'America/Los_Angeles', daa.DA_APPLICATION_CLOSED_RENDERED) as waitlist_timestamp_pst
+from proddb.public.dimension_dasher_applicant da
+  join proddb.public.dimension_dasher_applicant_attributes daa
+    on da.dasher_applicant_id = daa.dasher_applicant_id
+    where daa.DA_APPLICATION_CLOSED_RENDERED is not null
+    and daa.DA_Vehicle_Type_Rendered is null
+    and daa.background_submit_date is null
+    and da.first_dash_date is null
+)
+
+,off_waitlist_dx as (
+select 
+   dx.dasher_applicant_id
+  ,dx.dasher_id
+  ,dx.applied_submarket_id
+  ,dx.waitlist_timestamp_pst
+  ,max(sm.updated_timestamp_pst) as off_waitlist_timestamp_pst
+from tof_waitlist_dx dx
+  join sm_waitlist_change sm 
+    on dx.applied_submarket_id = sm.sm_id 
+    and sm.updated_timestamp_pst > dx.waitlist_timestamp_pst
+  join non_waitlist_sm nw
+    on dx.applied_submarket_id = nw.sm_id
+group by 1,2,3,4
+)
+
+,final_crm_list as (
+select
+    ow.*
+    ,max(split_part(da.name, ' ', 1)) as applicant_name
+    ,max(da.email) as applicant_email
+from off_waitlist_dx ow
+  join DOORDASH_DASHER.PUBLIC.MAINDB_DASHER_APPLICANT da
+    on ow.dasher_applicant_id = da.id
+group by 1,2,3,4,5
+)
+
+select 
+APPLIED_SUBMARKET_ID as TOF_APPLIED_SUBMARKET_ID
+, waitlist_timestamp_pst AS TOF_waitlist_timestamp_pst
+, off_waitlist_timestamp_pst AS TOF_off_waitlist_timestamp_pst
+, applicant_email as Email
+from final_crm_list
+order by off_waitlist_timestamp_pst desc
+
