@@ -1,0 +1,136 @@
+ WITH self_serve_fraud AS
+(
+SELECT DISTINCT
+EM.consumer_id
+, EM.consumer_email
+, DU.user_id
+, EM.delivery_id
+FROM
+proddb.public.fact_fraud_deliveries FRAUD
+LEFT JOIN
+proddb.public.fact_expensed_meals EM
+ON FRAUD.delivery_id = EM.delivery_ID
+LEFT JOIN
+team_management_prod.public.maindb_teams TEAMS
+ON TEAMS.id = EM.team_id
+LEFT JOIN
+proddb.public.dimension_users DU
+ON DU.consumer_id = FRAUD.consumer_id
+LEFT JOIN
+risk_service_prod.public.maindb_blocklisted_user BLOCKLISTED
+ON BLOCKLISTED.user_ID = DU.user_id
+WHERE
+TEAMS.onboarding_source = 'self_serve'
+AND BLOCKLISTED.deactivation_source IS NOT NULL
+)
+, admins AS
+(
+SELECT DISTINCT
+ROLES.team_account_id
+, MEMBERS.email AS email
+FROM
+team_management_prod.public.maindb_team_account_roles ROLES
+JOIN
+team_management_prod.public.maindb_team_members MEMBERS
+ON MEMBERS.id = ROLES.team_member_id
+WHERE
+ROLES.role = 'admin'
+),
+ Team_Memberships as (
+SELECT M.* ,
+ROW_NUMBER() OVER (PARTITION BY TEAM_MEMBER_ID ORDER BY CREATED_AT DESC) AS TEAM_JOIN_ORDER
+
+FROM team_management_prod.public.maindb_team_account_memberships M 
+
+--WHERE TEAM_MEMBER_ID = 'f3c2a1be-3fae-40fe-99f1-cd45c2f70aec' 
+QUALIFY TEAM_JOIN_ORDER = 1 ) ,
+
+ account AS
+(
+SELECT DISTINCT
+CASE WHEN TA.plan_id = 'self_serve_free' THEN 'self-serve' WHEN TA.plan_id = 'manual_management_free' THEN 'managed' END AS ddfw_account_category
+,	TA.id
+, TA.name AS team_account_name
+, ROLES.role
+, MEMBERS.email
+,ROW_NUMBER() OVER (PARTITION BY MEMBERS.email ORDER BY ROLES.role DESC) AS Admin_Or_Member_Rank --Ensuring if they are an admin and a member on a team, we only pull admin to eliminate 2 rows.
+FROM
+team_management_prod.public.maindb_team_accounts TA
+LEFT JOIN
+admins ADMIN
+ON ADMIN.team_account_id = TA.id
+LEFT JOIN
+Team_Memberships TM
+--team_management_prod.public.maindb_team_account_memberships TM
+ON TA.id = TM.team_account_id
+LEFT JOIN
+team_management_prod.public.maindb_team_account_roles ROLES
+ON ROLES.team_account_id = TM.team_account_id
+AND ROLES.team_member_id = TM.team_member_id
+LEFT JOIN
+team_management_prod.public.maindb_team_members MEMBERS
+ON MEMBERS.id = ROLES.team_member_id
+LEFT JOIN
+self_serve_fraud FRAUD
+ON FRAUD.user_id = MEMBERS.user_id
+WHERE
+--TA.created_at::DATE >= '2022-04-18'
+TA.name NOT ILIKE '%fraud%'
+AND TA.name NOT ILIKE '%doordash%'
+AND FRAUD.user_id IS NULL
+--and TM.TEAM_MEMBER_ID IN (
+ 
+QUALIFY Admin_Or_Member_Rank = 1  ),
+
+dashpass_account_records_ranked  AS
+(
+SELECT DISTINCT
+*
+, ROW_NUMBER() OVER (PARTITION BY team_account_id ORDER BY created_at DESC) AS record_rank
+FROM
+TEAM_MANAGEMENT_PROD.PUBLIC.MAINDB_TEAM_ACCOUNT_DASHPASS_INFO
+QUALIFY record_rank = 1
+)
+, expensed_meals_account_records_ranked  AS
+(
+SELECT DISTINCT
+*
+, ROW_NUMBER() OVER (PARTITION BY team_account_id ORDER BY created_at DESC) AS record_rank
+FROM
+TEAM_MANAGEMENT_PROD.PUBLIC.MAINDB_TEAM_ACCOUNT_EXPENSED_MEALS_INFO
+QUALIFY record_rank = 1
+)
+, products AS
+(
+SELECT DISTINCT
+TA.id ,
+DASHPASS_SUBSCRIPTION_STATUS AS has_dashpass,
+--, CASE WHEN (DP.deactivated_at::DATE > CURRENT_DATE() OR DP.deactivated_at IS NULL) AND DP.activated_at IS NOT NULL THEN TRUE ELSE FALSE END AS has_dashpass
+CASE WHEN (EM.deactivated_at::DATE > CURRENT_DATE() OR EM.deactivated_at IS NULL) AND EM.activated_at IS NOT NULL AND EM.expensed_meals_status = 'active' THEN TRUE ELSE FALSE END AS has_expensed_meals
+FROM
+account TA
+LEFT JOIN
+dashpass_account_records_ranked DP
+ON TA.id = DP.team_account_id
+AND DP.record_rank = 1
+LEFT JOIN
+expensed_meals_account_records_ranked EM
+ON TA.id = EM.team_account_id
+AND EM.record_rank = 1
+)
+SELECT DISTINCT
+A.ddfw_account_category AS PERSONAS_ddfw_account_category
+, A.id AS PERSONAS_DDFW_TEAM_ID
+, A.team_account_name AS PERSONAS_ddfw_team_account_name
+, P.has_dashpass AS PERSONAS_ddfw_account_dashpass_status
+, P.has_expensed_meals AS PERSONAS_ddfw_account_is_expensed_meal
+--, A.role
+, A.email
+FROM
+account A
+LEFT JOIN
+products P
+ON P.id = A.id
+WHERE EMAIL IS NOT NULL
+ORDER BY
+1,2,3
